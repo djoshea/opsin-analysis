@@ -8,7 +8,8 @@ par.chVmName = 'IN [01]';
 par.chLaserName = 'IN [23]';
 par.elicitedSpikeWindow = [1e-3 8e-3]; % where valid spikes occur
 par.snippetWindow = [-1e-3 13e-3]; % to display on the snippets plot
-assignargs(par, {});
+par.laserSignalType = 'toggle'; % 'toggle' or 'state', toggle means each rising edge toggle on/off
+assignargs(par, varargin);
 
 % spike detection params
 spikeDetectParams.threshHigh = -10;
@@ -20,6 +21,8 @@ spikeDetectParams = structargs(spikeDetectParams, varargin);
 %% Data load if necessary
 
 if(~exist('fnameOrData', 'var'))
+    fnameOrData = '';
+elseif(isempty(fnameOrData))
     fnameOrData = '';
 end
 
@@ -39,13 +42,9 @@ spikeDetectParams.maxSpikeWidthMS = round(spikeDetectParams.maxSpikeWidthMs / 10
 snippetWindowInds = round(snippetWindow / sis);
 elicitedSpikeWindowInds = elicitedSpikeWindow / sis;
 
-% Find laser pulse times
-laserThreshs = linterp([0 1], [min(chLaser(:)) max(chLaser(:))], [0.3 0.7]);
-laserPulseInds = spikeDetect(chLaser, 'keepEveryOther', 1, ...
-    'threshLow', laserThreshs(1), 'threshHigh', laserThreshs(2));
-laserPulseOffInds = spikeDetect(chLaser, 'keepEveryOtherEven', 1, ...
-    'threshLow', laserThreshs(1), 'threshHigh', laserThreshs(2));
-
+% Find laser pulse times as cell{iTrace}
+[laserPulseInds laserPulseOffInds] = getLaserSignal(chLaser, laserSignalType);
+    
 % Calculate laser pulse duration and frequency for each trace
 laserPulseDurations = arrayfun(@(i) mean(laserPulseOffInds{i}(1) - laserPulseInds{i}(1)), 1:nTraces) * sis;
 meanLaserPulseDuration = mean(laserPulseDurations);

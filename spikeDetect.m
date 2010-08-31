@@ -1,17 +1,21 @@
-function spikeInds = spikeDetect(traces, varargin)
-% spiketimes = spikeDetect(traces, varagin)
+function [ spikeInds spikeLowInds ] = spikeDetect(traces, varargin)
+% [spikeInds spikeFallingInds] = spikeDetect(traces, varagin)
 % params: threshHigh, threshLow, refractory, maxWidth
+%
+% Criteria: a spike must rise above threshHigh (at index spikeInds) and then fall 
+%   below threshLow (at index spikeLowInds) within maxWidth inds, with no 
+%   subsequent spikes allowed before refractory inds have elapsed since the
+%   threshHigh crossing of the previous spike
 
 par.threshHigh = 0;
 par.refractory = []; % in units of sampling
 par.threshLow = -30;
 par.maxSpikeWidth = Inf; % in units of sampling
-par.keepEveryOther = 0; % e.g. for on/off toggling signal
-par.keepEveryOtherEven = 0; % e.g. for on/off toggling signal, overrides above
 assignargs(par, varargin);
 
 nsweeps = size(traces,2);
-spiketimes = {};
+spikeInds = {};
+spikeLowInds = {};
 
 for sweepno = 1:nsweeps
   data = traces(:,sweepno);
@@ -22,6 +26,7 @@ for sweepno = 1:nsweeps
   
   % find times of upward threshold crossings separated by at least a refractory period
   upTimes = find(threshUpCross);
+  nextDownTimes = [];
   if(~isempty(upTimes))
       if(refractory)
           upTimes = upTimes([true; diff(upTimes) > refractory]);
@@ -33,17 +38,14 @@ for sweepno = 1:nsweeps
       nextDownTimes = arrayfun(nextDownTime, upTimes);
       nextUpTimes = [upTimes(2:end); Inf];
 
-      upTimes = upTimes(nextDownTimes < upTimes + maxSpikeWidth & ...
-          nextDownTimes < nextUpTimes);
-  end
-  
-  if(keepEveryOtherEven)
-      upTimes = upTimes(2:2:end);
-  elseif(keepEveryOther)
-      upTimes = upTimes(1:2:end);
+      % select spikes that cross lowThresh within maxSpikeWidth and before the threshHighCrossing
+      selectedUpTimes = nextDownTimes < (upTimes + maxSpikeWidth) & nextDownTimes < nextUpTimes;
+      upTimes = upTimes(selectedUpTimes);
+      nextDownTimes = nextDownTimes(selectedUpTimes);
   end
   
   spikeInds{sweepno} = upTimes;
+  spikeLowInds{sweepno} = nextDownTimes;
 end
 
 % if(nsweeps == 1)
