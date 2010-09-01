@@ -1,7 +1,9 @@
-function [regions indexWindow] = getPeriEventRegions( traces, eventInds, window, varargin)
+function [regions indexWindow relativeTime] = getPeriEventRegions( traces, eventInds, window, varargin)
 % traces is ntime x ntraces, eventInds is cell{ntraces}, window is [-before after]
+% specify sis as an argument to get relativeTime in real time units
 
 par.onlyIndexWindow = 0;
+par.sis = 1;
 assignargs(par, varargin);
 
 nTraces = size(traces,2);
@@ -26,4 +28,6 @@ for iTrace = 1:nTraces
     if(size(events,2) > size(events, 1)); events = events'; end;
     indexWindow{iTrace} = [events+window(1) events+window(2)];
 end
+
+relativeTime = [window(1) : window(2)]' * sis;
 
