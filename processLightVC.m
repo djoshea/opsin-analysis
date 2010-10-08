@@ -9,12 +9,13 @@ function out = processLightVC( fnameOrData, varargin )
 %% Parameter initialization
 par.showPlots = 1;
 par.savePlots = 0;
-par.chVmName = 'IN [01]';
-par.chLaserName = 'IN [23]';
+par.chVmName = '';
+par.chLaserName = '';
 par.minLaserPulseInactivation = 0.02; % minimum laser pulse duration to compute inactivation tau
 par.forcePeakDeactivation = 1;
 par.shadeLaserRegion = 1;
-assignargs(par, {});
+par.laserSignalType = 'toggle';
+assignargs(par, varargin);
 
 %% Data load if necessary
 
@@ -22,18 +23,24 @@ if(~exist('fnameOrData', 'var'))
     fnameOrData = '';
 end
 
-chMatchRegexes = {chVmName, chLaserName};
-[d sis h chMatches time fname fnamelast] = abfDataLoad(fnameOrData, chMatchRegexes);
-nTraces = size(d,3);
-chVm = chMatches{1};
-chLaser = chMatches{2};
-
+if(isempty(chVmName) || isempty(chLaserName))
+    chMatchRegexes = {}; % request them numerically
+else
+    chMatchRegexes = {chVmName, chLaserName};
+end
+    
+abfData = abfDataLoad(fnameOrData, chMatchRegexes);
+sis = abfData.sis;
+time = abfData.time; 
+nTraces = abfData.nTraces;
+chVm = abfData.channels{1};
+chLaser = abfData.channels{end};
+fnamelast = abfData.fnamePart;
 out = [];
 
 % Find laser pulse times
-laserThreshs = linterp([0 1], [min(chLaser(:)) max(chLaser(:))], [0.3 0.7]);
-laserTriggerPulses = spikeDetect(chLaser, 'threshLow', laserThreshs(1), 'threshHigh', laserThreshs(2));
-  
+[laserPulseInds laserPulseOffInds] = getLaserSignal(chLaser, laserSignalType);
+
 for iTrace = 1:nTraces
 
     if(isempty(fnamelast)) % don't know what filename to save to without prefix
@@ -41,9 +48,9 @@ for iTrace = 1:nTraces
     end
     
     % retrieve laser pulse times
-    laserOnInd = laserTriggerPulses{iTrace}(1);
+    laserOnInd = laserPulseInds{iTrace}(1);
     tLaserOn = time(laserOnInd);
-    laserOffInd = laserTriggerPulses{iTrace}(2);
+    laserOffInd = laserPulseOffInds{iTrace}(1);
     tLaserOff = time(laserOffInd);
     laserPulseDuration = tLaserOff - tLaserOn;
     out(iTrace).laserPulseDuration = laserPulseDuration;

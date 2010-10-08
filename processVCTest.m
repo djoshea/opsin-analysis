@@ -2,13 +2,18 @@ function out = processVCTest( fnameOrData, varargin )
 % computes accessResistance and membraneResistance (in megaohms) from a voltage step voltage clamp protocol
 
 %% Parameter initialization
+par.chIName = '';
+par.chVCName = '';
+par.chINum = 1;
+par.chVCNum = 2;
+par.postStepSteadyStateBegin = 0.3;
+par.voltageDelta = []; % used to override the extracted value
 par.showPlots = 1;
 par.savePlots = 0;
-par.chIName = 'IN [01]';
-par.chVCName = 'IN [23]';
-par.postStepSteadyStateBegin = 0.3;
-par.plotTrace = 1;
-assignargs(par, {});
+par.holding = -70;
+par.yl = [];
+par.protocolParams = []; % for overriding params detected from channel 2
+assignargs(par, varargin);
 
 %% Data load if necessary
 
@@ -16,19 +21,37 @@ if(~exist('fnameOrData', 'var'))
     fnameOrData = '';
 end
 
-chMatchRegexes = {chIName, chVCName};
-[d sis h chMatches time fname fnamelast] = abfDataLoad(fnameOrData, chMatchRegexes);
-nTraces = size(d,3);
-chI = chMatches{1};
-chVC = chMatches{2};
+if(isempty(chIName) || isempty(chVCName))
+    chMatchRegexes = {}; % request them numerically
+else
+    chMatchRegexes = {chIName, chVCName};
+end
+    
+abfData = abfDataLoad(fnameOrData, chMatchRegexes);
+sis = abfData.sis;
+time = abfData.time; 
+nTraces = abfData.nTraces;
+chI = abfData.channels{1};
+chVC = abfData.channels{2};
 
 out = [];
 
 % Find voltage step times
-[ stepInds stepLevels preStepLevel] = stepDetect(chVC);
-stepStartInds = cellfun(@(inds) inds(1), stepInds, 'UniformOutput', false);
-minStartInd = min(cellfun(@(inds) inds(1), stepInds));
-stepWidthMin = min(cellfun(@(inds) inds(2) - inds(1) - 1, stepInds));
+if(isempty(protocolParams))
+    % detect the protocol params from ch 2
+    [ stepInds stepLevels preStepLevel] = stepDetect(chVC);
+    stepStartInds = cellfun(@(inds) inds(1), stepInds, 'UniformOutput', false);
+    minStartInd = min(cellfun(@(inds) inds(1), stepInds));
+    stepWidthMin = min(cellfun(@(inds) inds(2) - inds(1) - 1, stepInds));
+else
+    stepStartInds = mat2cell(protocolParams.stepStartInd*ones(nTraces,1), ones(nTraces,1));
+    minStartInd = protocolParams.stepStartInd;
+    stepWidthMin = protocolParams.stepWidth;
+end
+
+% pass out detected protocol parameters
+out.stepStartInd = minStartInd;
+out.stepWidth = stepWidthMin;
 
 % Find average pre-pulse baseline region
 regions = getPeriEventRegions(chI, 1, [0 minStartInd-2]);
@@ -39,8 +62,14 @@ meanBaseline = mean(cell2mat(regions));
 meanTrace = mean(cell2mat(regions'), 2);
 
 % compute the mean command step height
-vDelta = mean(cellfun(@(levels, pre) levels(1) - pre, stepLevels, preStepLevel));
-
+if(isempty(voltageDelta))
+    % use the measured values from the traces
+    vDelta = mean(cellfun(@(levels, pre) levels(1) - pre, stepLevels, preStepLevel));
+else
+    % override the measured values (in case something is wrong with the gain)
+    vDelta = voltageDelta;
+end
+% vDelta = 10;
 [val iPeak] = min(meanTrace);
 currentPeak = val -  meanBaseline;
 steadyStateSkip = round(postStepSteadyStateBegin / sis);
@@ -51,17 +80,25 @@ currentSteadyState = mean(meanTrace(steadyStateSkip:end)) - meanBaseline;
 totalResistance = vDelta / currentSteadyState * 1000;
 out.accessResistance = vDelta / currentPeak * 1000;
 out.membraneResistance = totalResistance - out.accessResistance;
+out.totalResistance = totalResistance;
+out.meanBaseline = meanBaseline;
+out.voltageDelta = vDelta;
+% calculate resting potential (I = 0): MOhms * pA / 1000 = mV
+out.resting = holding - 10^-3*meanBaseline*totalResistance; 
 
-if(plotTrace)
+if(showPlots)
     figure(1), clf;
     plot(relativeTime*1000, meanTrace-meanBaseline,'k-')
     hold on
     plot(relativeTime(iPeak)*1000, currentPeak, 'r.');
     plot([0 max(relativeTime)*1000], [currentSteadyState currentSteadyState], 'r-');
     box off;
-    xlim([0 10]);
+    xlim([0 600]);
     xlabel('Time Relative to Step (ms)');
     ylabel('Current - Baseline (pA)');
+    if(~isempty(yl))
+        ylim(yl);
+    end
 end
 
 end

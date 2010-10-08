@@ -1,5 +1,5 @@
-function [d sis h chMatches time fname fnamelast] = abfDataLoad(fnameOrData, chMatchRegexes)
-% [d sis h fname fnamelast] = abfDataLoad(fnameOrData)
+function out = abfDataLoad(fnameOrData, chMatchRegexes)
+% out = abfDataLoad(fnameOrData)
 % either loads data from fname or extracts it from a struct
 % sis is si but in seconds rather than microseconds
 % chMatchRegexes is a cell array of string regexes that can retrieve channels whose names match, e.g. "IN 0" or "IN [02]"
@@ -22,7 +22,8 @@ else
    [file path] = uigetfile({'*.abf', 'Axon Binary File (*.abf)'}, ...
         'Choose the ABF to Load');
     if isequal(file,0) || isequal(path,0)
-        error('No ABF file chosen. Aborting.');
+        fprintf('Error: No ABF file chosen. Aborting.');
+        out = [];
         return % canceled
     end
     fname = strcat(path,file);
@@ -31,20 +32,38 @@ else
     
 end
 
-% some utility variables
+% convert to seconds from microseconds
 sis = si * 10^-6;
-fnamelast = fname(max([strfind(fname, '/') strfind(fname, '\')])+1:end);
-time = (0:size(d,1)-1) * si*10^-6;
+nchannels = size(d,2);
 
-% find channels by names or regexes 
-findChannel = @(nameRegex) find(cellfun(@(chName) ~isempty(regexp(chName, nameRegex)), h.recChNames));
-chMatches = cell(length(chMatchRegexes),1);
-for i = 1:length(chMatchRegexes)
-    chMatchInd = findChannel(chMatchRegexes{i});
-    if(isempty(chMatchInd))
-        error('Could not find channel matching regex "%s". Check the channel names specified.', chMatchRegexes{i});
+% some utility variables
+out = [];
+out.sis = sis;
+out.h = h;
+out.nSamples = size(d,1);
+out.nChannels = nchannels;
+out.nTraces = size(d,3);
+out.fname = fname;
+out.fnamePart = fname(max([strfind(fname, '/') strfind(fname, '\')])+1:end);
+out.time = (0:size(d,1)-1) * si*10^-6;
+
+if(~exist('chMatchRegexes', 'var') || isempty(chMatchRegexes))
+    % return each channel individually
+    out.channels = cell(nchannels,1);
+    for i = 1:nchannels
+        out.channels{i} = squeeze(d(:,i,:));
     end
-    chMatches{i} = squeeze(d(:,chMatchInd,:));
+else
+    % find channels by names or regexes
+    findChannel = @(nameRegex) find(cellfun(@(chName) ~isempty(regexp(chName, nameRegex)), h.recChNames));
+    out.channels = cell(length(chMatchRegexes),1);
+    for i = 1:length(chMatchRegexes)
+        chMatchInd = findChannel(chMatchRegexes{i});
+        if(isempty(chMatchInd))
+            error('Could not find channel matching regex "%s". Check the channel names specified.', chMatchRegexes{i});
+        end
+        out.channels{i} = squeeze(d(:,chMatchInd,:));
+    end
 end
 
 
