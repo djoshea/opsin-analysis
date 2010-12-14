@@ -1,5 +1,5 @@
 function out = processLightTrains(fnameOrData, varargin)
-% out = processLightTrains(data,samplingInMicrosec,varargin) or pLT(fname, varargin)
+% out = processLightTrains(fname, varargin)
 
 %% Parameter initialization
 par.showPlots = 1;
@@ -9,7 +9,7 @@ par.chLaserName = 'IN [23]';
 % window of time post-light pulse (in sec) where spikes may occur to be included for that pulse
 % this window will be truncated by the next light pulse (plus the first element, so that successive windows are adjacent)
 par.elicitedSpikeWindow = [1.5e-3 50e-3];
-par.snippetWindow = [-1e-3 13e-3]; % to display on the snippets plot
+par.snippetWindow = []; % to display on the snippets plot
 par.laserSignalType = 'toggle'; % 'toggle' or 'state', toggle means each rising edge toggle on/off
 par.printOutput = 1;
 
@@ -123,11 +123,12 @@ for iTrace = 1:nTraces
     if(spontaneousSpikes(iTrace) < 0)
 %         fprintf('Warning: Cell has negative spontaneous spikes. Check time windows\n');
     end
-    
-    firstSpikeTime = arrayfun(@(iMin, iMax) min(spikeInds{iTrace}(spikeInds{iTrace} >= iMin & spikeInds{iTrace} < iMax))-iMin,...
-        pulseWindows(spikesFoundInWindow{iTrace}>0,1), pulseWindows(spikesFoundInWindow{iTrace}>0,2)) * sis;
+
+    if(spikesElicited(iTrace) >= 5)
+        % compute time from light pulse on to first spike in each of the 40 windows
+        firstSpikeTime = arrayfun(@(iMin, iMax, iLaserOn) min(spikeInds{iTrace}(spikeInds{iTrace} >= iMin & spikeInds{iTrace} < iMax) - iLaserOn),...
+            pulseWindows(spikesFoundInWindow{iTrace}>0,1), pulseWindows(spikesFoundInWindow{iTrace}>0,2), laserPulseInds{iTrace}(spikesFoundInWindow{iTrace}>0)) * sis;
         
-    if(totalSpikesPerTrace(iTrace) >= 5)
         meanSpikeLatency(iTrace) = mean(firstSpikeTime);
         stdSpikeLatency(iTrace) = std(firstSpikeTime);
     else
@@ -137,20 +138,30 @@ for iTrace = 1:nTraces
 end
 
 % Grab larger regions near laser pulse times for display only
-snippetWindowInds = spikeWindowInds;
-[pulseSnippets ~] = getPeriEventRegions(chVm, laserPulseInds, snippetWindowInds);
+if(isempty(snippetWindow))
+    % if not specified, use spike detection windows then pad with Nans
+    snippetWindowInds = spikeWindowInds;
+    [pulseSnippets, ~, tvecSnippets] = getPeriEventRegions(chVm, laserPulseInds, snippetWindowInds, 'sis', sis);
 
-% pad each snippet with nans so all are the same length
-snippetLength = round(elicitedSpikeWindowInds(2)-elicitedSpikeWindowInds(1)+1);
-for iTrace = 1:nTraces
-    pulseSnippets{iTrace} = [ pulseSnippets{iTrace}; NaN(snippetLength-size(pulseSnippets{iTrace},1), size(pulseSnippets{iTrace},2))];
-end
+    % pad each snippet with nans so all are the same length
+    snippetLength = round(elicitedSpikeWindowInds(2)-elicitedSpikeWindowInds(1)+1);
+    for iTrace = 1:nTraces
+        pulseSnippetsPadded{iTrace} = [ pulseSnippets{iTrace}; NaN(snippetLength-size(pulseSnippets{iTrace},1), size(pulseSnippets{iTrace},2))];
+    end
+    tvecSnippetsPadded = sis*[elicitedSpikeWindowInds(1):elicitedSpikeWindowInds(2)];
+else
+    % if specified, use that window, no need to pad
+    snippetWindowInds = floor(snippetWindow / sis);
+    [pulseSnippets, ~, tvecSnippets] = getPeriEventRegions(chVm, laserPulseInds, snippetWindowInds, 'sis', sis);
+    pulseSnippetsPadded = pulseSnippets;
+    tvecSnippetsPadded = tvecSnippets{end};
+end 
 
 % Collect successful and failure snippets for visual display
 successSnippets = []; failureSnippets = [];
 for iTrace = 1:nTraces
-    successSnippets = [successSnippets, pulseSnippets{iTrace}(:, spikesFoundInWindow{iTrace} >0)];
-    failureSnippets = [failureSnippets, pulseSnippets{iTrace}(:, spikesFoundInWindow{iTrace}==0)];
+    successSnippets = [successSnippets, pulseSnippetsPadded{iTrace}(:, spikesFoundInWindow{iTrace} >0)];
+    failureSnippets = [failureSnippets, pulseSnippetsPadded{iTrace}(:, spikesFoundInWindow{iTrace}==0)];
 end
 
 %% Print calculated results
@@ -168,6 +179,9 @@ out.meanLaserPulseDuration = meanLaserPulseDuration;
 out.laserPulseDurations = laserPulseDurations;
 out.laserPulseFreqHz = laserPulseFreqHz;
 out.pulseSnippets = pulseSnippets;
+out.tvecSnippets = tvecSnippets;
+out.successSnippets = successSnippets;
+out.failureSnippets = failureSnippets;
 out.spikesFoundInWindow = spikesFoundInWindow;
 out.proportionPulsesWithSpikeSubperiod = proportionPulsesWithSpikeSubperiod;
 out.proportionPulsesWithSpike = proportionPulsesWithSpike;
@@ -180,7 +194,6 @@ out.stdSpikeLatency = stdSpikeLatency;
 %% Show extracted spike snippets
 if(showPlots)
 
-    tSnippetWindowMs = 1000*sis*(elicitedSpikeWindowInds(1):elicitedSpikeWindowInds(2));
     hfigSnippets = figure(5); clf;
     set(hfigSnippets, 'Name', 'Pulse-Triggered Waveforms', 'NumberTitle', 'off', 'Color', [1 1 1]);
     axh = gca;
@@ -190,17 +203,17 @@ if(showPlots)
      [ymin+0.01 ymin+0.01 ymax ymax], [0.8 1 1], 'EdgeColor', 'none');
     hold on
     if(~isempty(successSnippets))
-        plot(axh, tSnippetWindowMs, successSnippets, 'Color',[0.39 0.67 0.82], 'LineWidth', 1);
+        plot(axh, 1000*tvecSnippetsPadded, successSnippets, 'Color',[0.39 0.67 0.82], 'LineWidth', 1);
     end
     if(~isempty(failureSnippets))
-        plot(axh, tSnippetWindowMs, failureSnippets, 'Color',[0.5 0.5 0.5], 'LineWidth', 1);
+        plot(axh, 1000*tvecSnippetsPadded, failureSnippets, 'Color',[0.5 0.5 0.5], 'LineWidth', 1);
     end
-    plot([tSnippetWindowMs(1) tSnippetWindowMs(end)], [spikeDetectParams.threshHigh spikeDetectParams.threshHigh], '-', 'Color', [0.7 0.7 0.7]);
-    plot([tSnippetWindowMs(1) tSnippetWindowMs(end)], [spikeDetectParams.threshLow spikeDetectParams.threshLow], '--', 'Color', [0.7 0.7 0.7]);
+    plot(1000*[tvecSnippetsPadded(1) tvecSnippetsPadded(end)], [spikeDetectParams.threshHigh spikeDetectParams.threshHigh], '-', 'Color', [0.7 0.7 0.7]);
+    plot(1000*[tvecSnippetsPadded(1) tvecSnippetsPadded(end)], [spikeDetectParams.threshLow spikeDetectParams.threshLow], '--', 'Color', [0.7 0.7 0.7]);
     
     xlabel('Time After Pulse Onset (ms)');
     ylabel('Voltage (mV)');
-    xlim([tSnippetWindowMs(1) tSnippetWindowMs(end)]);
+    xlim(1000*[tvecSnippetsPadded(1) tvecSnippetsPadded(end)]);
     ylim([ymin ymax]);
     box off
     title('Pulse-triggered Voltage Waveforms');

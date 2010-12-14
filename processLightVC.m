@@ -15,7 +15,7 @@ par.minLaserPulseInactivation = 0.02; % minimum laser pulse duration to compute 
 par.forcePeakDeactivation = 1;
 par.shadeLaserRegion = 1;
 par.maxPeakLatency = 0.2;
-par.laserSignalType = 'toggle';
+par.laserSignalType = 'auto';
 par.processVCTestOnly = 0;
 par.currentPolarity = 'depolarizing'; % or hyperpolarizing
 
@@ -34,7 +34,7 @@ par.smoothDeactivationRegionTime = [];
 
 par.baselineWindowWidth = 0.5;
 par.postPeakFitInactivationOffset = 0.002;
-par.fitDeactivationOffset = 0.002;
+par.fitDeactivationOffset = 0.002; % start just beyond the peak so as to get a better fit
 
 par.baselinePostWindowWidth = 0.5;
 par.fitDeactivationToPostBaseline = 0;
@@ -43,6 +43,9 @@ par.endPulseCurrentWindowWidth = 0.1;
 par.computeLevelCrossingTimesOnset = [0.15 0.85];
 par.computeLevelCrossingTimesOffset = [0.15 0.85];
 par.imagesPath = '.';
+
+par.processInactivation = 1;
+par.processDeactivation = 1;
 
 assignargs(par, varargin);
 
@@ -88,7 +91,6 @@ else
 end
 
 for iTrace = 1:nTraces
-
     if(isempty(fnamelast)) % don't know what filename to save to without prefix
         savePlots = 0;
     end
@@ -127,6 +129,12 @@ for iTrace = 1:nTraces
         tLaserOff = time(laserOffInd);
         laserPulseDuration = tLaserOff - tLaserOn;
         out(iTrace).laserPulseDuration = laserPulseDuration;
+        
+        % determines whether the laser pulse is long enough for certain
+        % additional processing (inactivation, theshold crossings)
+        % this also changes how the deactivation fit is computed (from peak
+        % onwards instead of from laser off)
+        computeInactivation = laserPulseDuration >= minLaserPulseInactivation;
 
         % find baseline holding from pre-pulse region
         prePulseWindow = [max(0, tLaserOn-baselineWindowWidth) tLaserOn-sis];
@@ -158,20 +166,28 @@ for iTrace = 1:nTraces
         out(iTrace).tFlashToPeak = tPeak - tLaserOn;
         out(iTrace).peakCurrent = iMax - baselineCurrent;
         
-        % compute percentage threshold level crossing times for rise to peak
+        % compute percentage threshold level crossing times for rise to
+        % peak (for long laser pulses only)
         normalizedRise = (periPeakRegion-baselineCurrent)/(iMax-baselineCurrent);
         for iLevel = 1:length(computeLevelCrossingTimesOnset)
             threshLevel = computeLevelCrossingTimesOnset(iLevel);
-            crossInd = find(normalizedRise > threshLevel, 1, 'first');
-            tCross = tvPeriPulseWindow(crossInd);
             fldName = sprintf('tOnsetCrossLevel%02dp', round(threshLevel*100));
-            out(iTrace).(fldName) = tCross - tLaserOn;
-            levelCrossingTimesOnset(iLevel) = tCross;
-            valueCrossingTimesOnset(iLevel) = periPeakRegion(crossInd);
+            if(computeInactivation)
+                crossInd = find(normalizedRise > threshLevel, 1, 'first');
+                tCross = tvPeriPulseWindow(crossInd);
+
+                levelCrossingTimesOnset(iLevel) = tCross;
+                valueCrossingTimesOnset(iLevel) = periPeakRegion(crossInd);
+                out(iTrace).(fldName) = tCross - tLaserOn;
+            else
+                out(iTrace).(fldName) = NaN;
+            end
         end
 
-        computeInactivation = laserPulseDuration >= minLaserPulseInactivation;
-        if(computeInactivation)
+        % processInactivation is a "bother doing this?" flag set by the caller
+        % computeInactivation is a flag which is calculated to determine whether the light
+        %   pulse was long enough to even reach steady state
+        if(processInactivation && computeInactivation)
             % extract region during pulse on
             pulseWindow = [0 laserPulseDuration];
             pulseWindowInds = floor(pulseWindow / sis);
@@ -229,76 +245,86 @@ for iTrace = 1:nTraces
             out(iTrace).steadyState = NaN;
             out(iTrace).tauInactivation = NaN;
             out(iTrace).endPulseCurrent = NaN;
+            endPulseCurrent = iMax; % in original sign, used for later offset fitting
         end
 
-        % find deactivation kinetics: we take the region following the light pulse off
-        % or the peak time, whichever is later (short laser pulses have a alpha fn shape)
-        preOffset = 0.005; % grab a bit before offset for smoothing purposes
-        deactivationWindow = [-preOffset fitDeactivationOffset+baselinePostWindowWidth]; % determines how far beyond the pulse off/peak to consider
-        deactivationWindowInds = round(deactivationWindow / sis);
-        tvDeactivationOffset = (0:sis:(deactivationWindowInds(2)-deactivationWindowInds(1))*sis)' - preOffset;
-        
-        if(tLaserOff > tPeak)
-            % use the period following laser pulse off    
-            tvDeactivation = tvDeactivationOffset + tLaserOff + fitDeactivationOffset + preOffset;
-            regions = getPeriEventRegions( chVm(:,iTrace), laserOffInd, deactivationWindowInds);
-            deactivation = regions{1};
-        else
-            % use a period following the peak value
-            tvDeactivation = tvDeactivationOffset + tPeak + fitDeactivationOffset + preOffset;
-            regions = getPeriEventRegions( chVm(:,iTrace), tPeakInd, deactivationWindowInds);
-            deactivation = regions{1};
-        end
-        
-        % make upwards
-        deactivation = currentPolaritySign*deactivation;
+        if(processDeactivation)
+            % find deactivation kinetics: we take the region following the light pulse off
+            % or the peak time, whichever is later (short laser pulses have a alpha fn shape)
+            preOffset = 0.005 * (tLaserOff > tPeak); % grab a bit before offset for smoothing purposes, but only for long laser pulses
+            deactivationWindow = [-preOffset fitDeactivationOffset+baselinePostWindowWidth]; % determines how far beyond the pulse off/peak to consider
+            deactivationWindowInds = round(deactivationWindow / sis);
+            tvDeactivationOffset = (0:sis:(deactivationWindowInds(2)-deactivationWindowInds(1))*sis)' - preOffset;
 
-        % smooth if requested
-        if(~isempty(smoothDeactivationRegionTime))
-            deactivation = smooth(deactivation, smoothDeactivationRegionTime, 'rlowess');
-        end
+            if(tLaserOff > tPeak)
+                % use the period following laser pulse off    
+                tvDeactivation = tvDeactivationOffset + tLaserOff;
+                regions = getPeriEventRegions( chVm(:,iTrace), laserOffInd, deactivationWindowInds);
+                deactivation = regions{1};
+            else
+                % use a period following the peak value
+                tvDeactivation = tvDeactivationOffset + tPeak;
+                regions = getPeriEventRegions( chVm(:,iTrace), tPeakInd, deactivationWindowInds);
+                deactivation = regions{1};
+            end
 
-        % isolate region fitDeactivationOffset after the laser offset for fitting purposes (leads to better fit)
-        deactivationForFitting = deactivation(tvDeactivationOffset > fitDeactivationOffset);
-        tvDeactivationForFitting = tvDeactivationOffset(tvDeactivationOffset > fitDeactivationOffset) - fitDeactivationOffset;
-        
-        % should we fit the peak parameter in the exponential or just the tau?
-        if(forcePeakDeactivation)
-            optFit = fitoptions('Method', 'NonlinearLeastSquares', ...
-                'Lower', [0 -Inf], ...
-                'Upper', [deactivationWindow(2), currentPolaritySign*iMax], ...
-                'Startpoint', [laserPulseDuration/5, baselineCurrent]);
-            monoexpFun = fittype('(peak-steadyState)*exp(-t / tau) + steadyState', 'options', optFit, ...
-                'independent', 't', 'coefficients', {'tau', 'steadyState'}, 'problem', 'peak');
-            fitDeactivation = fit(tvDeactivationForFitting, deactivationForFitting, monoexpFun, 'problem', deactivationForFitting(1));
-        else
-            optFit = fitoptions('Method', 'NonlinearLeastSquares', ...
-                'Lower', [-Inf 0 -Inf], ...
-                'Upper', [Inf deactivationWindow(2), iMax], ...
-                'Startpoint', [baselineCurrent laserPulseDuration/5, baselineCurrent]);
-            monoexpFun = fittype('(peak-steadyState)*exp(-t / tau) + steadyState', 'options', optFit, ...
-                'independent', 't', 'coefficients', {'peak', 'tau', 'steadyState'});
-            fitDeactivation = fit(tvDeactivationForFitting, deactivationForFitting, monoexpFun);
-        end
-        postBaselineCurrent = currentPolaritySign*fitDeactivation.steadyState;
-        
-        out(iTrace).tauDeactivation = fitDeactivation.tau;
-        out(iTrace).postBaselineCurrent = postBaselineCurrent;
-        
-        % compute level crossing times for offset
-        normalizedRise = 1-(deactivation-postBaselineCurrent)/(endPulseCurrent-postBaselineCurrent);
-        for iLevel = 1:length(computeLevelCrossingTimesOffset)
-            threshLevel = computeLevelCrossingTimesOffset(iLevel);
-            crossInd = find(normalizedRise > threshLevel, 1, 'first');
-            tCross = tvDeactivation(crossInd);
-            fldName = sprintf('tOffsetCrossLevel%02dp', round(threshLevel*100));
-            out(iTrace).(fldName) = tCross - tLaserOff;
-            levelCrossingTimesOffset(iLevel) = tCross;
-            valueCrossingTimesOffset(iLevel) = deactivation(crossInd);
-        end
+            % make upwards
+            deactivation = currentPolaritySign*deactivation;
 
-        
-        % extract surrounding region
+            % smooth if requested
+            if(~isempty(smoothDeactivationRegionTime))
+                deactivation = smooth(deactivation, smoothDeactivationRegionTime, 'rlowess');
+            end
+
+            % isolate region fitDeactivationOffset after the laser offset for fitting purposes (leads to better fit)
+            deactivationForFitting = deactivation(tvDeactivationOffset > fitDeactivationOffset);
+            tvDeactivationOffsetForFitting = tvDeactivationOffset(tvDeactivationOffset > fitDeactivationOffset) - fitDeactivationOffset;
+            tvDeactivationForFit = tvDeactivation(tvDeactivationOffset > fitDeactivationOffset);
+
+            % should we fit the peak parameter in the exponential or just the tau?
+            if(forcePeakDeactivation)
+                optFit = fitoptions('Method', 'NonlinearLeastSquares', ...
+                    'Lower', [0 -Inf], ...
+                    'Upper', [deactivationWindow(2), currentPolaritySign*iMax], ...
+                    'Startpoint', [laserPulseDuration/5, baselineCurrent]);
+                monoexpFun = fittype('(peak-steadyState)*exp(-t / tau) + steadyState', 'options', optFit, ...
+                    'independent', 't', 'coefficients', {'tau', 'steadyState'}, 'problem', 'peak');
+                fitDeactivation = fit(tvDeactivationOffsetForFitting, deactivationForFitting, monoexpFun, 'problem', deactivationForFitting(1));
+            else
+                optFit = fitoptions('Method', 'NonlinearLeastSquares', ...
+                    'Lower', [-Inf 0 -Inf], ...
+                    'Upper', [Inf deactivationWindow(2), iMax], ...
+                    'Startpoint', [baselineCurrent laserPulseDuration/5, baselineCurrent]);
+                monoexpFun = fittype('(peak-steadyState)*exp(-t / tau) + steadyState', 'options', optFit, ...
+                    'independent', 't', 'coefficients', {'peak', 'tau', 'steadyState'});
+                fitDeactivation = fit(tvDeactivationOffsetForFitting, deactivationForFitting, monoexpFun);
+            end
+    %         postBaselineCurrent = currentPolaritySign*fitDeactivation.steadyState;
+            postBaselineCurrent = currentPolaritySign*fitDeactivation.steadyState;
+
+            out(iTrace).tauDeactivation = fitDeactivation.tau;
+            out(iTrace).postBaselineCurrent = postBaselineCurrent;
+
+            % compute level crossing times for offset (for long laser pulses only)
+            % map deactivation (already sign corrected) to go from
+            % 0=endPulseCurrent, 1=postBaselineCurrent
+            normalizedRise = (deactivation-endPulseCurrent)/(currentPolaritySign*endPulseCurrent-postBaselineCurrent);
+            for iLevel = 1:length(computeLevelCrossingTimesOffset)
+                threshLevel = computeLevelCrossingTimesOffset(iLevel);
+                fldName = sprintf('tOffsetCrossLevel%02dp', round(threshLevel*100));
+                if(computeInactivation)
+                    crossInd = find(normalizedRise > threshLevel, 1, 'first');
+                    tCross = tvDeactivation(crossInd);
+                    levelCrossingTimesOffset(iLevel) = tCross;
+                    valueCrossingTimesOffset(iLevel) = currentPolaritySign*deactivation(crossInd);
+                    out(iTrace).(fldName) = tCross - tLaserOff; 
+                else
+                    out(iTrace).(fldName) = NaN;
+                end               
+            end
+        end
+                
+        % show plot for photocurrent annotations
         if(showPlots)
 
             % grab the region of the trace to display
@@ -336,7 +362,7 @@ for iTrace = 1:nTraces
             
             % plot the smoothed deactivation region
             if(~isempty(smoothDeactivationRegionTime))
-                plot(tvDeactivation*1000-tDisplayOffsetMS, deactivation, 'k-', 'LineWidth', 2);
+                plot(tvDeactivation*1000-tDisplayOffsetMS, currentPolaritySign*deactivation, 'k-', 'LineWidth', 2);
             end
             
             % plot the laser signal
@@ -344,26 +370,28 @@ for iTrace = 1:nTraces
             plot([0 1000*laserPulseDuration], [blueLightLevel blueLightLevel], '-', 'Color', [0.3 0.5 1], 'LineWidth', 3);
 
             % plot the pre baseline level
-            plot(prePulseWindow*1000-tDisplayOffsetMS, currentPolaritySign*[baselineCurrent baselineCurrent], 'b-', 'LineWidth', 2);
+            plot(prePulseWindow*1000-tDisplayOffsetMS, [baselineCurrent baselineCurrent], 'b-', 'LineWidth', 2);
             % and post baseline level
-            plot([tvDeactivation(1) tvDeactivation(end)]*1000-tDisplayOffsetMS, currentPolaritySign*[postBaselineCurrent postBaselineCurrent], 'b-', 'LineWidth', 2);
+            plot([tvDeactivation(1) tvDeactivation(end)]*1000-tDisplayOffsetMS, [postBaselineCurrent postBaselineCurrent], 'b-', 'LineWidth', 2);
             
             % plot the inactivation fit
             if(computeInactivation)
-                plot(tvPostPeak*1000 - tDisplayOffsetMS, fitInactivation(tvPostPeakOffset), 'r-','LineWidth',2);
+                plot(tvPostPeak*1000 - tDisplayOffsetMS, currentPolaritySign*fitInactivation(tvPostPeakOffset), 'r-','LineWidth',2);
             end
 
             % plot the deactivation fit
-            plot(tvDeactivation*1000 - tDisplayOffsetMS, fitDeactivation(tvDeactivationOffset), 'g-', 'LineWidth', 2);
+            plot(tvDeactivationForFit*1000 - tDisplayOffsetMS, currentPolaritySign*fitDeactivation(tvDeactivationOffsetForFitting), 'g-', 'LineWidth', 2);
     %         plot(tvDeactivation*1000 - tDisplayOffsetMS, deactivation, 'c-');
 
-            % plot the onset level crossing times
-            for iLevel = 1:length(computeLevelCrossingTimesOnset)
-               plot(levelCrossingTimesOnset(iLevel)*1000-tDisplayOffsetMS, valueCrossingTimesOnset(iLevel), 'rx', 'MarkerSize', 8, 'LineWidth', 2);
-            end
-            % plot the offset level crossing times
-            for iLevel = 1:length(computeLevelCrossingTimesOffset)
-               plot(levelCrossingTimesOffset(iLevel)*1000-tDisplayOffsetMS, valueCrossingTimesOffset(iLevel), 'rx', 'MarkerSize', 8, 'LineWidth', 2);
+            if(computeInactivation)
+                % plot the onset level crossing times
+                for iLevel = 1:length(computeLevelCrossingTimesOnset)
+                   plot(levelCrossingTimesOnset(iLevel)*1000-tDisplayOffsetMS, valueCrossingTimesOnset(iLevel), 'rx', 'MarkerSize', 8, 'LineWidth', 2);
+                end
+                % plot the offset level crossing times
+                for iLevel = 1:length(computeLevelCrossingTimesOffset)
+                   plot(levelCrossingTimesOffset(iLevel)*1000-tDisplayOffsetMS, valueCrossingTimesOffset(iLevel), 'rx', 'MarkerSize', 8, 'LineWidth', 2);
+                end
             end
     
             % plot the peak location
@@ -391,6 +419,7 @@ for iTrace = 1:nTraces
         end
     end
     
+    % show plot for vc test probe at beginning of trace
     if(showPlots && ~isempty(searchWindowVC))
         figTrace = figure(34+iTrace); clf; set(figTrace, 'Color', [1 1 1], 'Name', 'VC Test Probe', 'NumberTitle', 'off');
         plot(tvRegionVC, regionVC{1}, '-', 'Color', [0.4 0.4 0.4]);
